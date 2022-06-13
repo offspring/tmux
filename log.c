@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2007 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -28,9 +28,6 @@
 
 static FILE	*log_file;
 static int	 log_level;
-
-static void	 log_event_cb(int, const char *);
-static void	 log_vwrite(const char *, va_list);
 
 /* Log callback for libevent. */
 static void
@@ -61,18 +58,31 @@ log_open(const char *name)
 
 	if (log_level == 0)
 		return;
-
-	if (log_file != NULL)
-		fclose(log_file);
+	log_close();
 
 	xasprintf(&path, "tmux-%s-%ld.log", name, (long)getpid());
-	log_file = fopen(path, "w");
+	log_file = fopen(path, "a");
 	free(path);
 	if (log_file == NULL)
 		return;
 
 	setvbuf(log_file, NULL, _IOLBF, 0);
 	event_set_log_callback(log_event_cb);
+}
+
+/* Toggle logging. */
+void
+log_toggle(const char *name)
+{
+	if (log_level == 0) {
+		log_level = 1;
+		log_open(name);
+		log_debug("log opened");
+	} else {
+		log_debug("log closed");
+		log_level = 0;
+		log_close();
+	}
 }
 
 /* Close logging. */
@@ -87,28 +97,28 @@ log_close(void)
 }
 
 /* Write a log message. */
-static void
-log_vwrite(const char *msg, va_list ap)
+static void printflike(1, 0)
+log_vwrite(const char *msg, va_list ap, const char *prefix)
 {
-	char		*fmt, *out;
+	char		*s, *out;
 	struct timeval	 tv;
 
 	if (log_file == NULL)
 		return;
 
-	if (vasprintf(&fmt, msg, ap) == -1)
-		exit(1);
-	if (stravis(&out, fmt, VIS_OCTAL|VIS_CSTYLE|VIS_TAB|VIS_NL) == -1)
-		exit(1);
+	if (vasprintf(&s, msg, ap) == -1)
+		return;
+	if (stravis(&out, s, VIS_OCTAL|VIS_CSTYLE|VIS_TAB|VIS_NL) == -1) {
+		free(s);
+		return;
+	}
+	free(s);
 
 	gettimeofday(&tv, NULL);
-	if (fprintf(log_file, "%lld.%06d %s\n", (long long)tv.tv_sec,
-	    (int)tv.tv_usec, out) == -1)
-		exit(1);
-	fflush(log_file);
-
+	if (fprintf(log_file, "%lld.%06d %s%s\n", (long long)tv.tv_sec,
+	    (int)tv.tv_usec, prefix, out) != -1)
+		fflush(log_file);
 	free(out);
-	free(fmt);
 }
 
 /* Log a debug message. */
@@ -117,8 +127,11 @@ log_debug(const char *msg, ...)
 {
 	va_list	ap;
 
+	if (log_file == NULL)
+		return;
+
 	va_start(ap, msg);
-	log_vwrite(msg, ap);
+	log_vwrite(msg, ap, "");
 	va_end(ap);
 }
 
@@ -126,13 +139,16 @@ log_debug(const char *msg, ...)
 __dead void
 fatal(const char *msg, ...)
 {
-	char	*fmt;
+	char	 tmp[256];
 	va_list	 ap;
 
-	va_start(ap, msg);
-	if (asprintf(&fmt, "fatal: %s: %s", msg, strerror(errno)) == -1)
+	if (snprintf(tmp, sizeof tmp, "fatal: %s: ", strerror(errno)) < 0)
 		exit(1);
-	log_vwrite(fmt, ap);
+
+	va_start(ap, msg);
+	log_vwrite(msg, ap, tmp);
+	va_end(ap);
+
 	exit(1);
 }
 
@@ -140,12 +156,11 @@ fatal(const char *msg, ...)
 __dead void
 fatalx(const char *msg, ...)
 {
-	char	*fmt;
 	va_list	 ap;
 
 	va_start(ap, msg);
-	if (asprintf(&fmt, "fatal: %s", msg) == -1)
-		exit(1);
-	log_vwrite(fmt, ap);
+	log_vwrite(msg, ap, "fatal: ");
+	va_end(ap);
+
 	exit(1);
 }

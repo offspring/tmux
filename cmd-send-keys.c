@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2008 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -27,69 +27,194 @@
  * Send keys to client.
  */
 
-enum cmd_retval	 cmd_send_keys_exec(struct cmd *, struct cmd_q *);
+static enum cmd_retval	cmd_send_keys_exec(struct cmd *, struct cmdq_item *);
 
 const struct cmd_entry cmd_send_keys_entry = {
-	"send-keys", "send",
-	"lRMt:", 0, -1,
-	"[-lRM] " CMD_TARGET_PANE_USAGE " key ...",
-	0,
-	cmd_send_keys_exec
+	.name = "send-keys",
+	.alias = "send",
+
+	.args = { "FHlMN:Rt:X", 0, -1, NULL },
+	.usage = "[-FHlMRX] [-N repeat-count] " CMD_TARGET_PANE_USAGE
+	         " key ...",
+
+	.target = { 't', CMD_FIND_PANE, 0 },
+
+	.flags = CMD_AFTERHOOK,
+	.exec = cmd_send_keys_exec
 };
 
 const struct cmd_entry cmd_send_prefix_entry = {
-	"send-prefix", NULL,
-	"2t:", 0, 0,
-	"[-2] " CMD_TARGET_PANE_USAGE,
-	0,
-	cmd_send_keys_exec
+	.name = "send-prefix",
+	.alias = NULL,
+
+	.args = { "2t:", 0, 0, NULL },
+	.usage = "[-2] " CMD_TARGET_PANE_USAGE,
+
+	.target = { 't', CMD_FIND_PANE, 0 },
+
+	.flags = CMD_AFTERHOOK,
+	.exec = cmd_send_keys_exec
 };
 
-enum cmd_retval
-cmd_send_keys_exec(struct cmd *self, struct cmd_q *cmdq)
+static struct cmdq_item *
+cmd_send_keys_inject_key(struct cmdq_item *item, struct cmdq_item *after,
+    key_code key)
 {
-	struct args		*args = self->args;
-	struct mouse_event	*m = &cmdq->item->mouse;
-	struct window_pane	*wp;
-	struct session		*s;
-	const u_char		*str;
-	int			 i;
+	struct cmd_find_state		*target = cmdq_get_target(item);
+	struct client			*tc = cmdq_get_target_client(item);
+	struct session			*s = target->s;
+	struct winlink			*wl = target->wl;
+	struct window_pane		*wp = target->wp;
+	struct window_mode_entry	*wme;
+	struct key_table		*table;
+	struct key_binding		*bd;
+
+	wme = TAILQ_FIRST(&wp->modes);
+	if (wme == NULL || wme->mode->key_table == NULL) {
+		if (window_pane_key(wp, tc, s, wl, key, NULL) != 0)
+			return (NULL);
+		return (item);
+	}
+	table = key_bindings_get_table(wme->mode->key_table(wme), 1);
+
+	bd = key_bindings_get(table, key & ~KEYC_MASK_FLAGS);
+	if (bd != NULL) {
+		table->references++;
+		after = key_bindings_dispatch(bd, after, tc, NULL, target);
+		key_bindings_unref_table(table);
+	}
+	return (after);
+}
+
+static struct cmdq_item *
+cmd_send_keys_inject_string(struct cmdq_item *item, struct cmdq_item *after,
+    struct args *args, int i)
+{
+	const char		*s = args_string(args, i);
+	struct utf8_data	*ud, *loop;
+	utf8_char		 uc;
 	key_code		 key;
+	char			*endptr;
+	long			 n;
+	int			 literal;
+
+	if (args_has(args, 'H')) {
+		n = strtol(s, &endptr, 16);
+		if (*s =='\0' || n < 0 || n > 0xff || *endptr != '\0')
+			return (item);
+		return (cmd_send_keys_inject_key(item, after, KEYC_LITERAL|n));
+	}
+
+	literal = args_has(args, 'l');
+	if (!literal) {
+		key = key_string_lookup_string(s);
+		if (key != KEYC_NONE && key != KEYC_UNKNOWN) {
+			after = cmd_send_keys_inject_key(item, after, key);
+			if (after != NULL)
+				return (after);
+		}
+		literal = 1;
+	}
+	if (literal) {
+		ud = utf8_fromcstr(s);
+		for (loop = ud; loop->size != 0; loop++) {
+			if (loop->size == 1 && loop->data[0] <= 0x7f)
+				key = loop->data[0];
+			else {
+				if (utf8_from_data(loop, &uc) != UTF8_DONE)
+					continue;
+				key = uc;
+			}
+			after = cmd_send_keys_inject_key(item, after, key);
+		}
+		free(ud);
+	}
+	return (after);
+}
+
+static enum cmd_retval
+cmd_send_keys_exec(struct cmd *self, struct cmdq_item *item)
+{
+	struct args			*args = cmd_get_args(self);
+	struct cmd_find_state		*target = cmdq_get_target(item);
+	struct client			*tc = cmdq_get_target_client(item);
+	struct session			*s = target->s;
+	struct winlink			*wl = target->wl;
+	struct window_pane		*wp = target->wp;
+	struct key_event		*event = cmdq_get_event(item);
+	struct mouse_event		*m = &event->m;
+	struct window_mode_entry	*wme = TAILQ_FIRST(&wp->modes);
+	struct cmdq_item		*after = item;
+	key_code			 key;
+	u_int				 i, np = 1;
+	u_int				 count = args_count(args);
+	char				*cause = NULL;
+
+	if (args_has(args, 'N')) {
+		np = args_strtonum_and_expand(args, 'N', 1, UINT_MAX, item,
+			 &cause);
+		if (cause != NULL) {
+			cmdq_error(item, "repeat count %s", cause);
+			free(cause);
+			return (CMD_RETURN_ERROR);
+		}
+		if (wme != NULL && (args_has(args, 'X') || count == 0)) {
+			if (wme->mode->command == NULL) {
+				cmdq_error(item, "not in a mode");
+				return (CMD_RETURN_ERROR);
+			}
+			wme->prefix = np;
+		}
+	}
+
+	if (args_has(args, 'X')) {
+		if (wme == NULL || wme->mode->command == NULL) {
+			cmdq_error(item, "not in a mode");
+			return (CMD_RETURN_ERROR);
+		}
+		if (!m->valid)
+			m = NULL;
+		wme->mode->command(wme, tc, s, wl, args, m);
+		return (CMD_RETURN_NORMAL);
+	}
 
 	if (args_has(args, 'M')) {
 		wp = cmd_mouse_pane(m, &s, NULL);
 		if (wp == NULL) {
-			cmdq_error(cmdq, "no mouse target");
+			cmdq_error(item, "no mouse target");
 			return (CMD_RETURN_ERROR);
 		}
-		window_pane_key(wp, NULL, s, m->key, m);
+		window_pane_key(wp, tc, s, wl, m->key, m);
 		return (CMD_RETURN_NORMAL);
 	}
 
-	if (cmd_find_pane(cmdq, args_get(args, 't'), &s, &wp) == NULL)
-		return (CMD_RETURN_ERROR);
-
-	if (self->entry == &cmd_send_prefix_entry) {
+	if (cmd_get_entry(self) == &cmd_send_prefix_entry) {
 		if (args_has(args, '2'))
 			key = options_get_number(s->options, "prefix2");
 		else
 			key = options_get_number(s->options, "prefix");
-		window_pane_key(wp, NULL, s, key, NULL);
+		cmd_send_keys_inject_key(item, item, key);
 		return (CMD_RETURN_NORMAL);
 	}
 
-	if (args_has(args, 'R'))
-		input_reset(wp);
+	if (args_has(args, 'R')) {
+		colour_palette_clear(&wp->palette);
+		input_reset(wp->ictx, 1);
+		wp->flags |= (PANE_STYLECHANGED|PANE_REDRAW);
+	}
 
-	for (i = 0; i < args->argc; i++) {
-		str = args->argv[i];
+	if (count == 0) {
+		if (args_has(args, 'N') || args_has(args, 'R'))
+			return (CMD_RETURN_NORMAL);
+		for (; np != 0; np--)
+			cmd_send_keys_inject_key(item, NULL, event->key);
+		return (CMD_RETURN_NORMAL);
+	}
 
-		if (!args_has(args, 'l') &&
-		    (key = key_string_lookup_string(str)) != KEYC_NONE) {
-			window_pane_key(wp, NULL, s, key, NULL);
-		} else {
-			for (; *str != '\0'; str++)
-				window_pane_key(wp, NULL, s, *str, NULL);
+	for (; np != 0; np--) {
+		for (i = 0; i < count; i++) {
+			after = cmd_send_keys_inject_string(item, after, args,
+			    i);
 		}
 	}
 

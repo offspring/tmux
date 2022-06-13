@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2007 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,10 +17,10 @@
  */
 
 #include <sys/types.h>
-#include <sys/time.h>
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "tmux.h"
 
@@ -34,6 +34,7 @@ struct paste_buffer {
 	size_t		 size;
 
 	char		*name;
+	time_t		 created;
 	int		 automatic;
 	u_int		 order;
 
@@ -41,27 +42,27 @@ struct paste_buffer {
 	RB_ENTRY(paste_buffer) time_entry;
 };
 
-u_int	paste_next_index;
-u_int	paste_next_order;
-u_int	paste_num_automatic;
-RB_HEAD(paste_name_tree, paste_buffer) paste_by_name;
-RB_HEAD(paste_time_tree, paste_buffer) paste_by_time;
+static u_int	paste_next_index;
+static u_int	paste_next_order;
+static u_int	paste_num_automatic;
+static RB_HEAD(paste_name_tree, paste_buffer) paste_by_name;
+static RB_HEAD(paste_time_tree, paste_buffer) paste_by_time;
 
-int paste_cmp_names(const struct paste_buffer *, const struct paste_buffer *);
-RB_PROTOTYPE(paste_name_tree, paste_buffer, name_entry, paste_cmp_names);
-RB_GENERATE(paste_name_tree, paste_buffer, name_entry, paste_cmp_names);
+static int	paste_cmp_names(const struct paste_buffer *,
+		    const struct paste_buffer *);
+RB_GENERATE_STATIC(paste_name_tree, paste_buffer, name_entry, paste_cmp_names);
 
-int paste_cmp_times(const struct paste_buffer *, const struct paste_buffer *);
-RB_PROTOTYPE(paste_time_tree, paste_buffer, time_entry, paste_cmp_times);
-RB_GENERATE(paste_time_tree, paste_buffer, time_entry, paste_cmp_times);
+static int	paste_cmp_times(const struct paste_buffer *,
+		    const struct paste_buffer *);
+RB_GENERATE_STATIC(paste_time_tree, paste_buffer, time_entry, paste_cmp_times);
 
-int
+static int
 paste_cmp_names(const struct paste_buffer *a, const struct paste_buffer *b)
 {
 	return (strcmp(a->name, b->name));
 }
 
-int
+static int
 paste_cmp_times(const struct paste_buffer *a, const struct paste_buffer *b)
 {
 	if (a->order > b->order)
@@ -78,6 +79,20 @@ paste_buffer_name(struct paste_buffer *pb)
 	return (pb->name);
 }
 
+/* Get paste buffer order. */
+u_int
+paste_buffer_order(struct paste_buffer *pb)
+{
+	return (pb->order);
+}
+
+/* Get paste buffer created. */
+time_t
+paste_buffer_created(struct paste_buffer *pb)
+{
+	return (pb->created);
+}
+
 /* Get paste buffer data. */
 const char *
 paste_buffer_data(struct paste_buffer *pb, size_t *size)
@@ -87,13 +102,19 @@ paste_buffer_data(struct paste_buffer *pb, size_t *size)
 	return (pb->data);
 }
 
-/* Walk paste buffers by name. */
+/* Walk paste buffers by time. */
 struct paste_buffer *
 paste_walk(struct paste_buffer *pb)
 {
 	if (pb == NULL)
 		return (RB_MIN(paste_time_tree, &paste_by_time));
 	return (RB_NEXT(paste_time_tree, &paste_by_time, pb));
+}
+
+int
+paste_is_empty(void)
+{
+	return RB_ROOT(&paste_by_time) == NULL;
 }
 
 /* Get the most recent automatic buffer. */
@@ -103,6 +124,8 @@ paste_get_top(const char **name)
 	struct paste_buffer	*pb;
 
 	pb = RB_MIN(paste_time_tree, &paste_by_time);
+	while (pb != NULL && !pb->automatic)
+		pb = RB_NEXT(paste_time_tree, &paste_by_time, pb);
 	if (pb == NULL)
 		return (NULL);
 	if (name != NULL)
@@ -142,13 +165,18 @@ paste_free(struct paste_buffer *pb)
  * that the caller is responsible for allocating data.
  */
 void
-paste_add(char *data, size_t size)
+paste_add(const char *prefix, char *data, size_t size)
 {
 	struct paste_buffer	*pb, *pb1;
 	u_int			 limit;
 
-	if (size == 0)
+	if (prefix == NULL)
+		prefix = "buffer";
+
+	if (size == 0) {
+		free(data);
 		return;
+	}
 
 	limit = options_get_number(global_options, "buffer-limit");
 	RB_FOREACH_REVERSE_SAFE(pb, paste_time_tree, &paste_by_time, pb1) {
@@ -163,7 +191,7 @@ paste_add(char *data, size_t size)
 	pb->name = NULL;
 	do {
 		free(pb->name);
-		xasprintf(&pb->name, "buffer%04u", paste_next_index);
+		xasprintf(&pb->name, "%s%u", prefix, paste_next_index);
 		paste_next_index++;
 	} while (paste_get_name(pb->name) != NULL);
 
@@ -172,6 +200,8 @@ paste_add(char *data, size_t size)
 
 	pb->automatic = 1;
 	paste_num_automatic++;
+
+	pb->created = time(NULL);
 
 	pb->order = paste_next_order++;
 	RB_INSERT(paste_name_tree, &paste_by_name, pb);
@@ -243,7 +273,7 @@ paste_set(char *data, size_t size, const char *name, char **cause)
 		return (0);
 	}
 	if (name == NULL) {
-		paste_add(data, size);
+		paste_add(NULL, data, size);
 		return (0);
 	}
 
@@ -263,6 +293,8 @@ paste_set(char *data, size_t size, const char *name, char **cause)
 	pb->automatic = 0;
 	pb->order = paste_next_order++;
 
+	pb->created = time(NULL);
+
 	if ((old = paste_get_name(name)) != NULL)
 		paste_free(old);
 
@@ -272,13 +304,22 @@ paste_set(char *data, size_t size, const char *name, char **cause)
 	return (0);
 }
 
+/* Set paste data without otherwise changing it. */
+void
+paste_replace(struct paste_buffer *pb, char *data, size_t size)
+{
+	free(pb->data);
+	pb->data = data;
+	pb->size = size;
+}
+
 /* Convert start of buffer into a nice string. */
 char *
 paste_make_sample(struct paste_buffer *pb)
 {
 	char		*buf;
 	size_t		 len, used;
-	const int	 flags = VIS_OCTAL|VIS_TAB|VIS_NL;
+	const int	 flags = VIS_OCTAL|VIS_CSTYLE|VIS_TAB|VIS_NL;
 	const size_t	 width = 200;
 
 	len = pb->size;

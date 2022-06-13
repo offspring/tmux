@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,8 +17,43 @@
 #ifndef COMPAT_H
 #define COMPAT_H
 
+#include <sys/types.h>
+#include <sys/ioctl.h>
+#include <sys/uio.h>
+
+#include <fnmatch.h>
+#include <limits.h>
+#include <stdio.h>
+#include <termios.h>
+#include <wchar.h>
+
+#ifdef HAVE_EVENT2_EVENT_H
+#include <event2/event.h>
+#include <event2/event_compat.h>
+#include <event2/event_struct.h>
+#include <event2/buffer.h>
+#include <event2/buffer_compat.h>
+#include <event2/bufferevent.h>
+#include <event2/bufferevent_struct.h>
+#include <event2/bufferevent_compat.h>
+#else
+#include <event.h>
+#endif
+
+#ifdef HAVE_MALLOC_TRIM
+#include <malloc.h>
+#endif
+
+#ifdef HAVE_UTF8PROC
+#include <utf8proc.h>
+#endif
+
 #ifndef __GNUC__
 #define __attribute__(a)
+#endif
+
+#ifdef BROKEN___DEAD
+#undef __dead
 #endif
 
 #ifndef __unused
@@ -30,24 +65,75 @@
 #ifndef __packed
 #define __packed __attribute__ ((__packed__))
 #endif
+#ifndef __weak
+#define __weak __attribute__ ((__weak__))
+#endif
 
 #ifndef ECHOPRT
 #define ECHOPRT 0
 #endif
 
-#ifndef HAVE_BSD_TYPES
-typedef uint8_t u_int8_t;
-typedef uint16_t u_int16_t;
-typedef uint32_t u_int32_t;
-typedef uint64_t u_int64_t;
+#ifndef ACCESSPERMS
+#define ACCESSPERMS (S_IRWXU|S_IRWXG|S_IRWXO)
 #endif
 
-#ifndef HAVE_PATHS_H
-#define	_PATH_BSHELL	"/bin/sh"
-#define	_PATH_TMP	"/tmp/"
+#if !defined(FIONREAD) && defined(__sun)
+#include <sys/filio.h>
+#endif
+
+#ifdef HAVE_ERR_H
+#include <err.h>
+#else
+void	err(int, const char *, ...);
+void	errx(int, const char *, ...);
+void	warn(const char *, ...);
+void	warnx(const char *, ...);
+#endif
+
+#ifdef HAVE_PATHS_H
+#include <paths.h>
+#endif
+
+#ifndef _PATH_BSHELL
+#define _PATH_BSHELL	"/bin/sh"
+#endif
+
+#ifndef _PATH_TMP
+#define _PATH_TMP	"/tmp/"
+#endif
+
+#ifndef _PATH_DEVNULL
 #define _PATH_DEVNULL	"/dev/null"
+#endif
+
+#ifndef _PATH_TTY
 #define _PATH_TTY	"/dev/tty"
+#endif
+
+#ifndef _PATH_DEV
 #define _PATH_DEV	"/dev/"
+#endif
+
+#ifndef _PATH_DEFPATH
+#define _PATH_DEFPATH	"/usr/bin:/bin"
+#endif
+
+#ifndef _PATH_VI
+#define _PATH_VI	"/usr/bin/vi"
+#endif
+
+#ifndef __OpenBSD__
+#define pledge(s, p) (0)
+#endif
+
+#ifndef IMAXBEL
+#define IMAXBEL 0
+#endif
+
+#ifdef HAVE_STDINT_H
+#include <stdint.h>
+#else
+#include <inttypes.h>
 #endif
 
 #ifdef HAVE_QUEUE_H
@@ -68,20 +154,16 @@ typedef uint64_t u_int64_t;
 #include "compat/bitstring.h"
 #endif
 
-#ifdef HAVE_PATHS_H
-#include <paths.h>
-#endif
-
-#ifdef HAVE_FORKPTY
 #ifdef HAVE_LIBUTIL_H
 #include <libutil.h>
 #endif
+
 #ifdef HAVE_PTY_H
 #include <pty.h>
 #endif
+
 #ifdef HAVE_UTIL_H
 #include <util.h>
-#endif
 #endif
 
 #ifdef HAVE_VIS
@@ -94,12 +176,6 @@ typedef uint64_t u_int64_t;
 #include <imsg.h>
 #else
 #include "compat/imsg.h"
-#endif
-
-#ifdef HAVE_STDINT_H
-#include <stdint.h>
-#else
-#include <inttypes.h>
 #endif
 
 #ifdef BROKEN_CMSG_FIRSTHDR
@@ -128,6 +204,14 @@ typedef uint64_t u_int64_t;
 
 #ifndef O_DIRECTORY
 #define O_DIRECTORY 0
+#endif
+
+#ifndef FNM_CASEFOLD
+#ifdef FNM_IGNORECASE
+#define FNM_CASEFOLD FNM_IGNORECASE
+#else
+#define FNM_CASEFOLD 0
+#endif
 #endif
 
 #ifndef INFTIM
@@ -181,6 +265,13 @@ typedef uint64_t u_int64_t;
 #define HOST_NAME_MAX 255
 #endif
 
+#ifndef CLOCK_REALTIME
+#define CLOCK_REALTIME 0
+#endif
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC CLOCK_REALTIME
+#endif
+
 #ifndef HAVE_FLOCK
 #define LOCK_SH 0
 #define LOCK_EX 0
@@ -188,9 +279,19 @@ typedef uint64_t u_int64_t;
 #define flock(fd, op) (0)
 #endif
 
+#ifndef HAVE_EXPLICIT_BZERO
+/* explicit_bzero.c */
+void		 explicit_bzero(void *, size_t);
+#endif
+
+#ifndef HAVE_GETDTABLECOUNT
+/* getdtablecount.c */
+int		 getdtablecount(void);
+#endif
+
 #ifndef HAVE_CLOSEFROM
 /* closefrom.c */
-void	closefrom(int);
+void		 closefrom(int);
 #endif
 
 #ifndef HAVE_STRCASESTR
@@ -218,20 +319,63 @@ size_t	 	 strlcpy(char *, const char *, size_t);
 size_t	 	 strlcat(char *, const char *, size_t);
 #endif
 
+#ifndef HAVE_STRNLEN
+/* strnlen.c */
+size_t		 strnlen(const char *, size_t);
+#endif
+
+#ifndef HAVE_STRNDUP
+/* strndup.c */
+char		*strndup(const char *, size_t);
+#endif
+
+#ifndef HAVE_MEMMEM
+/* memmem.c */
+void		*memmem(const void *, size_t, const void *, size_t);
+#endif
+
+#ifndef HAVE_GETPEEREID
+/* getpeereid.c */
+int		getpeereid(int, uid_t *, gid_t *);
+#endif
+
 #ifndef HAVE_DAEMON
 /* daemon.c */
 int	 	 daemon(int, int);
 #endif
 
+#ifndef HAVE_GETPROGNAME
+/* getprogname.c */
+const char	*getprogname(void);
+#endif
+
+#ifndef HAVE_SETPROCTITLE
+/* setproctitle.c */
+void		 setproctitle(const char *, ...);
+#endif
+
+#ifndef HAVE_CLOCK_GETTIME
+/* clock_gettime.c */
+int		 clock_gettime(int, struct timespec *);
+#endif
+
 #ifndef HAVE_B64_NTOP
-/* b64_ntop.c */
-#undef b64_ntop /* for Cygwin */
+/* base64.c */
+#undef b64_ntop
+#undef b64_pton
 int		 b64_ntop(const char *, size_t, char *, size_t);
+int		 b64_pton(const char *, u_char *, size_t);
+#endif
+
+#ifndef HAVE_FDFORKPTY
+/* fdforkpty.c */
+int		 getptmfd(void);
+pid_t		 fdforkpty(int, int *, char *, struct termios *,
+		     struct winsize *);
 #endif
 
 #ifndef HAVE_FORKPTY
 /* forkpty.c */
-#include <sys/ioctl.h>
 pid_t		 forkpty(int *, char *, struct termios *, struct winsize *);
 #endif
 
@@ -246,8 +390,9 @@ int		 vasprintf(char **, const char *, va_list);
 char		*fgetln(FILE *, size_t *);
 #endif
 
-#ifndef HAVE_FPARSELN
-char		*fparseln(FILE *, size_t *, size_t *, const char *, int);
+#ifndef HAVE_GETLINE
+/* getline.c */
+ssize_t		 getline(char **, size_t *, FILE *);
 #endif
 
 #ifndef HAVE_SETENV
@@ -261,20 +406,38 @@ int		 unsetenv(const char *);
 void		 cfmakeraw(struct termios *);
 #endif
 
-#ifndef HAVE_OPENAT
-/* openat.c */
-#define AT_FDCWD -100
-int		 openat(int, const char *, int, ...);
+#ifndef HAVE_FREEZERO
+/* freezero.c */
+void		 freezero(void *, size_t);
 #endif
 
 #ifndef HAVE_REALLOCARRAY
 /* reallocarray.c */
-void		*reallocarray(void *, size_t, size_t size);
+void		*reallocarray(void *, size_t, size_t);
 #endif
 
-#ifdef HAVE_GETOPT
-#include <getopt.h>
-#else
+#ifndef HAVE_RECALLOCARRAY
+/* recallocarray.c */
+void		*recallocarray(void *, size_t, size_t, size_t);
+#endif
+
+#ifdef HAVE_SYSTEMD
+/* systemd.c */
+int		 systemd_create_socket(int, char **);
+#endif
+
+#ifdef HAVE_UTF8PROC
+/* utf8proc.c */
+int		 utf8proc_wcwidth(wchar_t);
+int		 utf8proc_mbtowc(wchar_t *, const char *, size_t);
+int		 utf8proc_wctomb(char *, wchar_t);
+#endif
+
+#ifdef NEED_FUZZING
+/* tmux.c */
+#define main __weak main
+#endif
+
 /* getopt.c */
 extern int	BSDopterr;
 extern int	BSDoptind;
@@ -288,6 +451,5 @@ int	BSDgetopt(int, char *const *, const char *);
 #define optopt             BSDoptopt
 #define optreset           BSDoptreset
 #define optarg             BSDoptarg
-#endif
 
 #endif /* COMPAT_H */

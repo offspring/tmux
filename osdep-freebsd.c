@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2009 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -24,12 +24,13 @@
 
 #include <err.h>
 #include <errno.h>
-#include <event.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <libutil.h>
+
+#include "compat.h"
 
 struct kinfo_proc	*cmp_procs(struct kinfo_proc *, struct kinfo_proc *);
 char			*osdep_get_name(int, char *);
@@ -193,10 +194,15 @@ osdep_get_cwd(int fd)
 struct event_base *
 osdep_event_init(void)
 {
+	struct event_base	*base;
+
 	/*
 	 * On some versions of FreeBSD, kqueue doesn't work properly on tty
 	 * file descriptors. This is fixed in recent FreeBSD versions.
 	 */
 	setenv("EVENT_NOKQUEUE", "1", 1);
-	return (event_init());
+
+	base = event_init();
+	unsetenv("EVENT_NOKQUEUE");
+	return (base);
 }

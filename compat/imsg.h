@@ -1,4 +1,4 @@
-/*	$OpenBSD: imsg.h,v 1.3 2013/12/26 17:32:33 eric Exp $	*/
+/*	$OpenBSD: imsg.h,v 1.5 2019/01/20 02:50:03 bcook Exp $	*/
 
 /*
  * Copyright (c) 2006, 2007 Pierre-Yves Ritschard <pyr@openbsd.org>
@@ -18,10 +18,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include "tmux.h"
-
 #ifndef _IMSG_H_
 #define _IMSG_H_
+
+#include <stdint.h>
 
 #define IBUF_READ_SIZE		65535
 #define IMSG_HEADER_SIZE	sizeof(struct imsg_hdr)
@@ -29,7 +29,7 @@
 
 struct ibuf {
 	TAILQ_ENTRY(ibuf)	 entry;
-	u_char			*buf;
+	unsigned char		*buf;
 	size_t			 size;
 	size_t			 max;
 	size_t			 wpos;
@@ -39,13 +39,13 @@ struct ibuf {
 
 struct msgbuf {
 	TAILQ_HEAD(, ibuf)	 bufs;
-	u_int32_t		 queued;
+	uint32_t		 queued;
 	int			 fd;
 };
 
 struct ibuf_read {
-	u_char			 buf[IBUF_READ_SIZE];
-	u_char			*rptr;
+	unsigned char		 buf[IBUF_READ_SIZE];
+	unsigned char		*rptr;
 	size_t			 wpos;
 };
 
@@ -65,11 +65,11 @@ struct imsgbuf {
 #define IMSGF_HASFD	1
 
 struct imsg_hdr {
-	u_int32_t	 type;
-	u_int16_t	 len;
-	u_int16_t	 flags;
-	u_int32_t	 peerid;
-	u_int32_t	 pid;
+	uint32_t	 type;
+	uint16_t	 len;
+	uint16_t	 flags;
+	uint32_t	 peerid;
+	uint32_t	 pid;
 };
 
 struct imsg {
@@ -99,13 +99,12 @@ void		 msgbuf_drain(struct msgbuf *, size_t);
 void	 imsg_init(struct imsgbuf *, int);
 ssize_t	 imsg_read(struct imsgbuf *);
 ssize_t	 imsg_get(struct imsgbuf *, struct imsg *);
-int	 imsg_compose(struct imsgbuf *, u_int32_t, u_int32_t, pid_t,
-	    int, const void *, u_int16_t);
-int	 imsg_composev(struct imsgbuf *, u_int32_t, u_int32_t,  pid_t,
-	    int, const struct iovec *, int);
-struct ibuf *imsg_create(struct imsgbuf *, u_int32_t, u_int32_t, pid_t,
-	    u_int16_t);
-int	 imsg_add(struct ibuf *, const void *, u_int16_t);
+int	 imsg_compose(struct imsgbuf *, uint32_t, uint32_t, pid_t, int,
+	    const void *, uint16_t);
+int	 imsg_composev(struct imsgbuf *, uint32_t, uint32_t,  pid_t, int,
+	    const struct iovec *, int);
+struct ibuf *imsg_create(struct imsgbuf *, uint32_t, uint32_t, pid_t, uint16_t);
+int	 imsg_add(struct ibuf *, const void *, uint16_t);
 void	 imsg_close(struct imsgbuf *, struct ibuf *);
 void	 imsg_free(struct imsg *);
 int	 imsg_flush(struct imsgbuf *);

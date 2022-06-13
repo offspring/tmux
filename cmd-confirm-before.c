@@ -28,97 +28,115 @@
  * Asks for confirmation before executing a command.
  */
 
-enum cmd_retval	 cmd_confirm_before_exec(struct cmd *, struct cmd_q *);
+static enum args_parse_type	cmd_confirm_before_args_parse(struct args *,
+				    u_int, char **);
+static enum cmd_retval		cmd_confirm_before_exec(struct cmd *,
+				    struct cmdq_item *);
 
-int		 cmd_confirm_before_callback(void *, const char *);
-void		 cmd_confirm_before_free(void *);
+static int	cmd_confirm_before_callback(struct client *, void *,
+		    const char *, int);
+static void	cmd_confirm_before_free(void *);
 
 const struct cmd_entry cmd_confirm_before_entry = {
-	"confirm-before", "confirm",
-	"p:t:", 1, 1,
-	"[-p prompt] " CMD_TARGET_CLIENT_USAGE " command",
-	0,
-	cmd_confirm_before_exec
+	.name = "confirm-before",
+	.alias = "confirm",
+
+	.args = { "bp:t:", 1, 1, cmd_confirm_before_args_parse },
+	.usage = "[-b] [-p prompt] " CMD_TARGET_CLIENT_USAGE " command",
+
+	.flags = CMD_CLIENT_TFLAG,
+	.exec = cmd_confirm_before_exec
 };
 
 struct cmd_confirm_before_data {
-	char		*cmd;
-	struct client	*client;
+	struct cmdq_item	*item;
+	struct cmd_list		*cmdlist;
 };
 
-enum cmd_retval
-cmd_confirm_before_exec(struct cmd *self, struct cmd_q *cmdq)
+static enum args_parse_type
+cmd_confirm_before_args_parse(__unused struct args *args, __unused u_int idx,
+    __unused char **cause)
 {
-	struct args			*args = self->args;
-	struct cmd_confirm_before_data	*cdata;
-	struct client			*c;
-	char				*cmd, *copy, *new_prompt, *ptr;
-	const char			*prompt;
+	return (ARGS_PARSE_COMMANDS_OR_STRING);
+}
 
-	if ((c = cmd_find_client(cmdq, args_get(args, 't'), 0)) == NULL)
+static enum cmd_retval
+cmd_confirm_before_exec(struct cmd *self, struct cmdq_item *item)
+{
+	struct args			*args = cmd_get_args(self);
+	struct cmd_confirm_before_data	*cdata;
+	struct client			*tc = cmdq_get_target_client(item);
+	struct cmd_find_state		*target = cmdq_get_target(item);
+	char				*new_prompt;
+	const char			*prompt, *cmd;
+	int				 wait = !args_has(args, 'b');
+
+	cdata = xcalloc(1, sizeof *cdata);
+	cdata->cmdlist = args_make_commands_now(self, item, 0, 1);
+	if (cdata->cmdlist == NULL)
 		return (CMD_RETURN_ERROR);
+
+	if (wait)
+		cdata->item = item;
 
 	if ((prompt = args_get(args, 'p')) != NULL)
 		xasprintf(&new_prompt, "%s ", prompt);
 	else {
-		ptr = copy = xstrdup(args->argv[0]);
-		cmd = strsep(&ptr, " \t");
+		cmd = cmd_get_entry(cmd_list_first(cdata->cmdlist))->name;
 		xasprintf(&new_prompt, "Confirm '%s'? (y/n) ", cmd);
-		free(copy);
 	}
 
-	cdata = xmalloc(sizeof *cdata);
-	cdata->cmd = xstrdup(args->argv[0]);
-
-	cdata->client = c;
-	cdata->client->references++;
-
-	status_prompt_set(c, new_prompt, NULL,
+	status_prompt_set(tc, target, new_prompt, NULL,
 	    cmd_confirm_before_callback, cmd_confirm_before_free, cdata,
-	    PROMPT_SINGLE);
-
+	    PROMPT_SINGLE, PROMPT_TYPE_COMMAND);
 	free(new_prompt);
-	return (CMD_RETURN_NORMAL);
+
+	if (!wait)
+		return (CMD_RETURN_NORMAL);
+	return (CMD_RETURN_WAIT);
 }
 
-int
-cmd_confirm_before_callback(void *data, const char *s)
+static int
+cmd_confirm_before_callback(struct client *c, void *data, const char *s,
+    __unused int done)
 {
 	struct cmd_confirm_before_data	*cdata = data;
-	struct client			*c = cdata->client;
-	struct cmd_list			*cmdlist;
-	char				*cause;
+	struct cmdq_item		*item = cdata->item, *new_item;
+	int				 retcode = 1;
 
 	if (c->flags & CLIENT_DEAD)
-		return (0);
+		goto out;
 
 	if (s == NULL || *s == '\0')
-		return (0);
-	if (tolower((u_char) s[0]) != 'y' || s[1] != '\0')
-		return (0);
+		goto out;
+	if (tolower((u_char)s[0]) != 'y' || s[1] != '\0')
+		goto out;
+	retcode = 0;
 
-	if (cmd_string_parse(cdata->cmd, &cmdlist, NULL, 0, &cause) != 0) {
-		if (cause != NULL) {
-			cmdq_error(c->cmdq, "%s", cause);
-			free(cause);
-		}
-		return (0);
+	if (item == NULL) {
+		new_item = cmdq_get_command(cdata->cmdlist, NULL);
+		cmdq_append(c, new_item);
+	} else {
+		new_item = cmdq_get_command(cdata->cmdlist,
+		    cmdq_get_state(item));
+		cmdq_insert_after(item, new_item);
 	}
 
-	cmdq_run(c->cmdq, cmdlist, NULL);
-	cmd_list_free(cmdlist);
-
+out:
+        if (item != NULL) {
+                if (cmdq_get_client(item) != NULL &&
+                    cmdq_get_client(item)->session == NULL)
+                        cmdq_get_client(item)->retval = retcode;
+                cmdq_continue(item);
+        }
 	return (0);
 }
 
-void
+static void
 cmd_confirm_before_free(void *data)
 {
 	struct cmd_confirm_before_data	*cdata = data;
-	struct client			*c = cdata->client;
 
-	server_client_unref(c);
-
-	free(cdata->cmd);
+	cmd_list_free(cdata->cmdlist);
 	free(cdata);
 }

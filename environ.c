@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2009 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,8 +18,10 @@
 
 #include <sys/types.h>
 
+#include <fnmatch.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "tmux.h"
 
@@ -28,11 +30,10 @@
  */
 
 RB_HEAD(environ, environ_entry);
-int	environ_cmp(struct environ_entry *, struct environ_entry *);
-RB_PROTOTYPE(environ, environ_entry, entry, environ_cmp);
-RB_GENERATE(environ, environ_entry, entry, environ_cmp);
+static int environ_cmp(struct environ_entry *, struct environ_entry *);
+RB_GENERATE_STATIC(environ, environ_entry, entry, environ_cmp);
 
-int
+static int
 environ_cmp(struct environ_entry *envent1, struct environ_entry *envent2)
 {
 	return (strcmp(envent1->name, envent2->name));
@@ -86,8 +87,10 @@ environ_copy(struct environ *srcenv, struct environ *dstenv)
 	RB_FOREACH(envent, environ, srcenv) {
 		if (envent->value == NULL)
 			environ_clear(dstenv, envent->name);
-		else
-			environ_set(dstenv, envent->name, "%s", envent->value);
+		else {
+			environ_set(dstenv, envent->name, envent->flags,
+			    "%s", envent->value);
+		}
 	}
 }
 
@@ -103,18 +106,21 @@ environ_find(struct environ *env, const char *name)
 
 /* Set an environment variable. */
 void
-environ_set(struct environ *env, const char *name, const char *fmt, ...)
+environ_set(struct environ *env, const char *name, int flags, const char *fmt,
+    ...)
 {
 	struct environ_entry	*envent;
 	va_list			 ap;
 
 	va_start(ap, fmt);
 	if ((envent = environ_find(env, name)) != NULL) {
+		envent->flags = flags;
 		free(envent->value);
 		xvasprintf(&envent->value, fmt, ap);
 	} else {
 		envent = xmalloc(sizeof *envent);
 		envent->name = xstrdup(name);
+		envent->flags = flags;
 		xvasprintf(&envent->value, fmt, ap);
 		RB_INSERT(environ, env, envent);
 	}
@@ -133,6 +139,7 @@ environ_clear(struct environ *env, const char *name)
 	} else {
 		envent = xmalloc(sizeof *envent);
 		envent->name = xstrdup(name);
+		envent->flags = 0;
 		envent->value = NULL;
 		RB_INSERT(environ, env, envent);
 	}
@@ -140,7 +147,7 @@ environ_clear(struct environ *env, const char *name)
 
 /* Set an environment variable from a NAME=VALUE string. */
 void
-environ_put(struct environ *env, const char *var)
+environ_put(struct environ *env, const char *var, int flags)
 {
 	char	*name, *value;
 
@@ -152,7 +159,7 @@ environ_put(struct environ *env, const char *var)
 	name = xstrdup(var);
 	name[strcspn(name, "=")] = '\0';
 
-	environ_set(env, name, "%s", value);
+	environ_set(env, name, flags, "%s", value);
 	free(name);
 }
 
@@ -170,44 +177,96 @@ environ_unset(struct environ *env, const char *name)
 	free(envent);
 }
 
-/*
- * Copy a space-separated list of variables from a destination into a source
- * environment.
- */
+/* Copy variables from a destination into a source environment. */
 void
-environ_update(const char *vars, struct environ *srcenv,
-    struct environ *dstenv)
+environ_update(struct options *oo, struct environ *src, struct environ *dst)
 {
-	struct environ_entry	*envent;
-	char			*copyvars, *var, *next;
+	struct environ_entry		*envent;
+	struct options_entry		*o;
+	struct options_array_item	*a;
+	union options_value		*ov;
 
-	copyvars = next = xstrdup(vars);
-	while ((var = strsep(&next, " ")) != NULL) {
-		if ((envent = environ_find(srcenv, var)) == NULL)
-			environ_clear(dstenv, var);
+	o = options_get(oo, "update-environment");
+	if (o == NULL)
+		return;
+	a = options_array_first(o);
+	while (a != NULL) {
+		ov = options_array_item_value(a);
+		RB_FOREACH(envent, environ, src) {
+			if (fnmatch(ov->string, envent->name, 0) == 0)
+				break;
+		}
+		if (envent == NULL)
+			environ_clear(dst, ov->string);
 		else
-			environ_set(dstenv, envent->name, "%s", envent->value);
+			environ_set(dst, envent->name, 0, "%s", envent->value);
+		a = options_array_next(a);
 	}
-	free(copyvars);
 }
 
 /* Push environment into the real environment - use after fork(). */
 void
 environ_push(struct environ *env)
 {
-	struct environ_entry	 *envent;
-	char			**vp, *v;
+	struct environ_entry	*envent;
 
-	for (vp = environ; *vp != NULL; vp++) {
-		v = xstrdup(*vp);
-		v[strcspn(v, "=")] = '\0';
-
-		unsetenv(v);
-		free(v);
-	}
-
+	environ = xcalloc(1, sizeof *environ);
 	RB_FOREACH(envent, environ, env) {
-		if (envent->value != NULL)
+		if (envent->value != NULL &&
+		    *envent->name != '\0' &&
+		    (~envent->flags & ENVIRON_HIDDEN))
 			setenv(envent->name, envent->value, 1);
 	}
+}
+
+/* Log the environment. */
+void
+environ_log(struct environ *env, const char *fmt, ...)
+{
+	struct environ_entry	*envent;
+	va_list			 ap;
+	char			*prefix;
+
+	va_start(ap, fmt);
+	vasprintf(&prefix, fmt, ap);
+	va_end(ap);
+
+	RB_FOREACH(envent, environ, env) {
+		if (envent->value != NULL && *envent->name != '\0') {
+			log_debug("%s%s=%s", prefix, envent->name,
+			    envent->value);
+		}
+	}
+
+	free(prefix);
+}
+
+/* Create initial environment for new child. */
+struct environ *
+environ_for_session(struct session *s, int no_TERM)
+{
+	struct environ	*env;
+	const char	*value;
+	int		 idx;
+
+	env = environ_create();
+	environ_copy(global_environ, env);
+	if (s != NULL)
+		environ_copy(s->environ, env);
+
+	if (!no_TERM) {
+		value = options_get_string(global_options, "default-terminal");
+		environ_set(env, "TERM", 0, "%s", value);
+		environ_set(env, "TERM_PROGRAM", 0, "%s", "tmux");
+		environ_set(env, "TERM_PROGRAM_VERSION", 0, "%s", getversion());
+	}
+
+	if (s != NULL)
+		idx = s->id;
+	else
+		idx = -1;
+	environ_set(env, "TMUX", 0, "%s,%ld,%d", socket_path, (long)getpid(),
+	    idx);
+
+	return (env);
 }

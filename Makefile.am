@@ -2,61 +2,69 @@
 
 # Obvious program stuff.
 bin_PROGRAMS = tmux
-CLEANFILES = tmux.1.mdoc tmux.1.man
+CLEANFILES = tmux.1.mdoc tmux.1.man cmd-parse.c
 
 # Distribution tarball options.
 EXTRA_DIST = \
-	CHANGES FAQ README TODO COPYING examples compat/*.[ch] \
-	array.h compat.h tmux.h osdep-*.c mdoc2man.awk tmux.1
-dist-hook:
-	make clean
-	grep "^#found_debug=" configure
+	CHANGES README README.ja COPYING example_tmux.conf \
+	osdep-*.c mdoc2man.awk tmux.1
+dist_EXTRA_tmux_SOURCES = compat/*.[ch]
 
 # Preprocessor flags.
-CPPFLAGS += @XOPEN_DEFINES@ -DTMUX_CONF="\"$(sysconfdir)/tmux.conf\""
+AM_CPPFLAGS += @XOPEN_DEFINES@ \
+	-DTMUX_VERSION='"@VERSION@"' \
+	-DTMUX_CONF='"$(sysconfdir)/tmux.conf:~/.tmux.conf:$$XDG_CONFIG_HOME/tmux/tmux.conf:~/.config/tmux/tmux.conf"' \
+	-DTMUX_TERM='"@DEFAULT_TERM@"'
 
-# glibc as usual does things ass-backwards and hides useful things by default,
-# so everyone has to add this.
-if IS_GLIBC
-CFLAGS += -D_GNU_SOURCE
-endif
+# Additional object files.
+LDADD = $(LIBOBJS)
 
 # Set flags for gcc.
 if IS_GCC
-CFLAGS += -std=gnu99 -O2
+AM_CFLAGS += -std=gnu99 -O2
 if IS_DEBUG
-CFLAGS += -g
-CFLAGS += -Wno-long-long -Wall -W -Wnested-externs -Wformat=2
-CFLAGS += -Wmissing-prototypes -Wstrict-prototypes -Wmissing-declarations
-CFLAGS += -Wwrite-strings -Wshadow -Wpointer-arith -Wsign-compare
-CFLAGS += -Wundef -Wbad-function-cast -Winline -Wcast-align
-CFLAGS += -Wdeclaration-after-statement -Wno-pointer-sign -Wno-attributes
-CPPFLAGS += -DDEBUG
+AM_CFLAGS += -g
+AM_CFLAGS += -Wno-long-long -Wall -W -Wformat=2
+AM_CFLAGS += -Wmissing-prototypes -Wstrict-prototypes -Wmissing-declarations
+AM_CFLAGS += -Wwrite-strings -Wshadow -Wpointer-arith -Wsign-compare
+AM_CFLAGS += -Wundef -Wbad-function-cast -Winline -Wcast-align
+AM_CFLAGS += -Wdeclaration-after-statement -Wno-pointer-sign -Wno-attributes
+AM_CFLAGS += -Wno-unused-result -Wno-format-y2k
+if IS_DARWIN
+AM_CFLAGS += -Wno-deprecated-declarations -Wno-cast-align
 endif
-if IS_COVERAGE
-CFLAGS += -g -O0 --coverage
-LDFLAGS += --coverage
+AM_CPPFLAGS += -DDEBUG
 endif
-CPPFLAGS += -iquote.
+AM_CPPFLAGS += -iquote.
 endif
 
 # Set flags for Solaris.
 if IS_SUNOS
 if IS_GCC
-CPPFLAGS += -D_XPG6 -D__EXTENSIONS__ -D_POSIX_PTHREAD_SEMANTICS
+AM_CPPFLAGS += -D_XPG6
 else
-CPPFLAGS += -D_XPG4_2 -D__EXTENSIONS__ -D_POSIX_PTHREAD_SEMANTICS
+AM_CPPFLAGS += -D_XPG4_2
 endif
 endif
 
 # Set flags for Sun CC.
 if IS_SUNCC
-CFLAGS += -erroff=E_EMPTY_DECLARATION
+AM_CFLAGS += -erroff=E_EMPTY_DECLARATION
 endif
 
-# Set _LINUX_SOURCE_COMPAT for AIX for mallocing 0 bytes
+# Set _LINUX_SOURCE_COMPAT for AIX for malloc(0).
 if IS_AIX
-DEFS += -D_LINUX_SOURCE_COMPAT=1
+AM_CPPFLAGS += -D_LINUX_SOURCE_COMPAT=1
+endif
+
+# Set flags for NetBSD.
+if IS_NETBSD
+AM_CPPFLAGS += -D_OPENBSD_SOURCE
+endif
+
+# Set flags for Haiku.
+if IS_HAIKU
+AM_CPPFLAGS += -D_BSD_SOURCE
 endif
 
 # List of sources.
@@ -70,18 +78,16 @@ dist_tmux_SOURCES = \
 	cmd-bind-key.c \
 	cmd-break-pane.c \
 	cmd-capture-pane.c \
-	cmd-choose-buffer.c \
-	cmd-choose-client.c \
 	cmd-choose-tree.c \
-	cmd-clear-history.c \
 	cmd-command-prompt.c \
 	cmd-confirm-before.c \
 	cmd-copy-mode.c \
 	cmd-detach-client.c \
+	cmd-display-menu.c \
 	cmd-display-message.c \
 	cmd-display-panes.c \
-	cmd-find.c \
 	cmd-find-window.c \
+	cmd-find.c \
 	cmd-if-shell.c \
 	cmd-join-pane.c \
 	cmd-kill-pane.c \
@@ -94,12 +100,12 @@ dist_tmux_SOURCES = \
 	cmd-list-panes.c \
 	cmd-list-sessions.c \
 	cmd-list-windows.c \
-	cmd-list.c \
 	cmd-load-buffer.c \
 	cmd-lock-server.c \
 	cmd-move-window.c \
 	cmd-new-session.c \
 	cmd-new-window.c \
+	cmd-parse.y \
 	cmd-paste-buffer.c \
 	cmd-pipe-pane.c \
 	cmd-queue.c \
@@ -107,6 +113,7 @@ dist_tmux_SOURCES = \
 	cmd-rename-session.c \
 	cmd-rename-window.c \
 	cmd-resize-pane.c \
+	cmd-resize-window.c \
 	cmd-respawn-pane.c \
 	cmd-respawn-window.c \
 	cmd-rotate-window.c \
@@ -116,15 +123,16 @@ dist_tmux_SOURCES = \
 	cmd-select-pane.c \
 	cmd-select-window.c \
 	cmd-send-keys.c \
+	cmd-server-access.c \
 	cmd-set-buffer.c \
 	cmd-set-environment.c \
 	cmd-set-option.c \
 	cmd-show-environment.c \
 	cmd-show-messages.c \
 	cmd-show-options.c \
+	cmd-show-prompt-history.c \
 	cmd-source-file.c \
 	cmd-split-window.c \
-	cmd-string.c \
 	cmd-swap-pane.c \
 	cmd-swap-window.c \
 	cmd-switch-client.c \
@@ -132,10 +140,14 @@ dist_tmux_SOURCES = \
 	cmd-wait-for.c \
 	cmd.c \
 	colour.c \
-	control.c \
+	compat.h \
 	control-notify.c \
+	control.c \
 	environ.c \
+	file.c \
 	format.c \
+	format-draw.c \
+	grid-reader.c \
 	grid-view.c \
 	grid.c \
 	input-keys.c \
@@ -147,95 +159,67 @@ dist_tmux_SOURCES = \
 	layout-set.c \
 	layout.c \
 	log.c \
-	mode-key.c \
+	menu.c \
+	mode-tree.c \
 	names.c \
 	notify.c \
 	options-table.c \
 	options.c \
 	paste.c \
+	popup.c \
 	proc.c \
+	regsub.c \
 	resize.c \
 	screen-redraw.c \
 	screen-write.c \
 	screen.c \
+	server-acl.c \
 	server-client.c \
 	server-fn.c \
 	server.c \
 	session.c \
-	signal.c \
+	spawn.c \
 	status.c \
 	style.c \
 	tmux.c \
+	tmux.h \
+	tmux-protocol.h \
 	tty-acs.c \
+	tty-features.c \
 	tty-keys.c \
 	tty-term.c \
 	tty.c \
 	utf8.c \
-	window-choose.c \
+	window-buffer.c \
+	window-client.c \
 	window-clock.c \
 	window-copy.c \
+	window-customize.c \
+	window-tree.c \
 	window.c \
 	xmalloc.c \
-	xterm-keys.c
+	xmalloc.h
 nodist_tmux_SOURCES = osdep-@PLATFORM@.c
 
-# Pile in all the compat/ stuff that is needed.
-if NO_FORKPTY
+# Add compat file for forkpty.
+if NEED_FORKPTY
 nodist_tmux_SOURCES += compat/forkpty-@PLATFORM@.c
 endif
-if NO_IMSG
-nodist_tmux_SOURCES += compat/imsg.c compat/imsg-buffer.c
+
+# Add compat file for systemd.
+if HAVE_SYSTEMD
+nodist_tmux_SOURCES += compat/systemd.c
 endif
-if NO_CLOSEFROM
-nodist_tmux_SOURCES += compat/closefrom.c
+
+# Add compat file for utf8proc.
+if HAVE_UTF8PROC
+nodist_tmux_SOURCES += compat/utf8proc.c
 endif
-if NO_DAEMON
-nodist_tmux_SOURCES += compat/daemon.c
-endif
-if NO_SETENV
-nodist_tmux_SOURCES += compat/setenv.c
-endif
-if NO_STRLCAT
-nodist_tmux_SOURCES += compat/strlcat.c
-endif
-if NO_STRLCPY
-nodist_tmux_SOURCES += compat/strlcpy.c
-endif
-if NO_ASPRINTF
-nodist_tmux_SOURCES += compat/asprintf.c
-endif
-if NO_FGETLN
-nodist_tmux_SOURCES += compat/fgetln.c
-endif
-if NO_FPARSELN
-nodist_tmux_SOURCES += compat/fparseln.c
-endif
-if NO_GETOPT
-nodist_tmux_SOURCES += compat/getopt.c
-endif
-if NO_STRCASESTR
-nodist_tmux_SOURCES += compat/strcasestr.c
-endif
-if NO_STRSEP
-nodist_tmux_SOURCES += compat/strsep.c
-endif
-if NO_VIS
-nodist_tmux_SOURCES += compat/vis.c compat/unvis.c
-endif
-if NO_STRTONUM
-nodist_tmux_SOURCES += compat/strtonum.c
-endif
-if NO_B64_NTOP
-nodist_tmux_SOURCES += compat/b64_ntop.c
-endif
-if NO_CFMAKERAW
-nodist_tmux_SOURCES += compat/cfmakeraw.c
-endif
-if NO_OPENAT
-nodist_tmux_SOURCES += compat/openat.c
-endif
-if NO_REALLOCARRAY
-nodist_tmux_SOURCES += compat/reallocarray.c
+
+if NEED_FUZZING
+check_PROGRAMS = fuzz/input-fuzzer
+fuzz_input_fuzzer_LDFLAGS = $(FUZZING_LIBS)
+fuzz_input_fuzzer_LDADD = $(LDADD) $(tmux_OBJECTS)
 endif
 
 # Install tmux.1 in the right format.
@@ -245,7 +229,7 @@ install-exec-hook:
 			>$(srcdir)/tmux.1.mdoc; \
 	else \
 		sed -e "s|@SYSCONFDIR@|$(sysconfdir)|g" $(srcdir)/tmux.1| \
-			$(AWK) -f$(srcdir)/mdoc2man.awk >$(srcdir)/tmux.1.man; \
+			$(AWK) -f $(srcdir)/mdoc2man.awk >$(srcdir)/tmux.1.man; \
 	fi
 	$(mkdir_p) $(DESTDIR)$(mandir)/man1
 	$(INSTALL_DATA) $(srcdir)/tmux.1.@MANFORMAT@ \

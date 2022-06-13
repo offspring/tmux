@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2009 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -26,52 +26,66 @@
  * Switch window to selected layout.
  */
 
-enum cmd_retval	 cmd_select_layout_exec(struct cmd *, struct cmd_q *);
+static enum cmd_retval	cmd_select_layout_exec(struct cmd *,
+			    struct cmdq_item *);
 
 const struct cmd_entry cmd_select_layout_entry = {
-	"select-layout", "selectl",
-	"nopt:", 0, 1,
-	"[-nop] " CMD_TARGET_WINDOW_USAGE " [layout-name]",
-	0,
-	cmd_select_layout_exec
+	.name = "select-layout",
+	.alias = "selectl",
+
+	.args = { "Enopt:", 0, 1, NULL },
+	.usage = "[-Enop] " CMD_TARGET_PANE_USAGE " [layout-name]",
+
+	.target = { 't', CMD_FIND_PANE, 0 },
+
+	.flags = CMD_AFTERHOOK,
+	.exec = cmd_select_layout_exec
 };
 
 const struct cmd_entry cmd_next_layout_entry = {
-	"next-layout", "nextl",
-	"t:", 0, 0,
-	CMD_TARGET_WINDOW_USAGE,
-	0,
-	cmd_select_layout_exec
+	.name = "next-layout",
+	.alias = "nextl",
+
+	.args = { "t:", 0, 0, NULL },
+	.usage = CMD_TARGET_WINDOW_USAGE,
+
+	.target = { 't', CMD_FIND_WINDOW, 0 },
+
+	.flags = CMD_AFTERHOOK,
+	.exec = cmd_select_layout_exec
 };
 
 const struct cmd_entry cmd_previous_layout_entry = {
-	"previous-layout", "prevl",
-	"t:", 0, 0,
-	CMD_TARGET_WINDOW_USAGE,
-	0,
-	cmd_select_layout_exec
+	.name = "previous-layout",
+	.alias = "prevl",
+
+	.args = { "t:", 0, 0, NULL },
+	.usage = CMD_TARGET_WINDOW_USAGE,
+
+	.target = { 't', CMD_FIND_WINDOW, 0 },
+
+	.flags = CMD_AFTERHOOK,
+	.exec = cmd_select_layout_exec
 };
 
-enum cmd_retval
-cmd_select_layout_exec(struct cmd *self, struct cmd_q *cmdq)
+static enum cmd_retval
+cmd_select_layout_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args	*args = self->args;
-	struct winlink	*wl;
-	struct window	*w;
-	const char	*layoutname;
-	char		*oldlayout;
-	int		 next, previous, layout;
-
-	if ((wl = cmd_find_window(cmdq, args_get(args, 't'), NULL)) == NULL)
-		return (CMD_RETURN_ERROR);
-	w = wl->window;
+	struct args		*args = cmd_get_args(self);
+	struct cmd_find_state	*target = cmdq_get_target(item);
+	struct winlink		*wl = target->wl;
+	struct window		*w = wl->window;
+	struct window_pane	*wp = target->wp;
+	const char		*layoutname;
+	char			*oldlayout, *cause;
+	int			 next, previous, layout;
 
 	server_unzoom_window(w);
 
-	next = self->entry == &cmd_next_layout_entry;
+	next = (cmd_get_entry(self) == &cmd_next_layout_entry);
 	if (args_has(args, 'n'))
 		next = 1;
-	previous = self->entry == &cmd_previous_layout_entry;
+	previous = (cmd_get_entry(self) == &cmd_previous_layout_entry);
 	if (args_has(args, 'p'))
 		previous = 1;
 
@@ -86,27 +100,33 @@ cmd_select_layout_exec(struct cmd *self, struct cmd_q *cmdq)
 		goto changed;
 	}
 
+	if (args_has(args, 'E')) {
+		layout_spread_out(wp);
+		goto changed;
+	}
+
+	if (args_count(args) != 0)
+		layoutname = args_string(args, 0);
+	else if (args_has(args, 'o'))
+		layoutname = oldlayout;
+	else
+		layoutname = NULL;
+
 	if (!args_has(args, 'o')) {
-		if (args->argc == 0)
+		if (layoutname == NULL)
 			layout = w->lastlayout;
 		else
-			layout = layout_set_lookup(args->argv[0]);
+			layout = layout_set_lookup(layoutname);
 		if (layout != -1) {
 			layout_set_select(w, layout);
 			goto changed;
 		}
 	}
 
-	if (args->argc != 0)
-		layoutname = args->argv[0];
-	else if (args_has(args, 'o'))
-		layoutname = oldlayout;
-	else
-		layoutname = NULL;
-
 	if (layoutname != NULL) {
-		if (layout_parse(w, layoutname) == -1) {
-			cmdq_error(cmdq, "can't set layout: %s", layoutname);
+		if (layout_parse(w, layoutname, &cause) == -1) {
+			cmdq_error(item, "%s: %s", cause, layoutname);
+			free(cause);
 			goto error;
 		}
 		goto changed;
@@ -117,7 +137,9 @@ cmd_select_layout_exec(struct cmd *self, struct cmd_q *cmdq)
 
 changed:
 	free(oldlayout);
+	recalculate_sizes();
 	server_redraw_window(w);
+	notify_window("window-layout-changed", w);
 	return (CMD_RETURN_NORMAL);
 
 error:

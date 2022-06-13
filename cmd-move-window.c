@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2008 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -26,68 +26,86 @@
  * Move a window.
  */
 
-enum cmd_retval	 cmd_move_window_exec(struct cmd *, struct cmd_q *);
+static enum cmd_retval	cmd_move_window_exec(struct cmd *, struct cmdq_item *);
 
 const struct cmd_entry cmd_move_window_entry = {
-	"move-window", "movew",
-	"adkrs:t:", 0, 0,
-	"[-dkr] " CMD_SRCDST_WINDOW_USAGE,
-	0,
-	cmd_move_window_exec
+	.name = "move-window",
+	.alias = "movew",
+
+	.args = { "abdkrs:t:", 0, 0, NULL },
+	.usage = "[-abdkr] " CMD_SRCDST_WINDOW_USAGE,
+
+	.source = { 's', CMD_FIND_WINDOW, 0 },
+	/* -t is special */
+
+	.flags = 0,
+	.exec = cmd_move_window_exec
 };
 
 const struct cmd_entry cmd_link_window_entry = {
-	"link-window", "linkw",
-	"adks:t:", 0, 0,
-	"[-dk] " CMD_SRCDST_WINDOW_USAGE,
-	0,
-	cmd_move_window_exec
+	.name = "link-window",
+	.alias = "linkw",
+
+	.args = { "abdks:t:", 0, 0, NULL },
+	.usage = "[-abdk] " CMD_SRCDST_WINDOW_USAGE,
+
+	.source = { 's', CMD_FIND_WINDOW, 0 },
+	/* -t is special */
+
+	.flags = 0,
+	.exec = cmd_move_window_exec
 };
 
-enum cmd_retval
-cmd_move_window_exec(struct cmd *self, struct cmd_q *cmdq)
+static enum cmd_retval
+cmd_move_window_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args	*args = self->args;
-	struct session	*src, *dst, *s;
-	struct winlink	*wl;
-	char		*cause;
-	int		 idx, kflag, dflag, sflag;
+	struct args		*args = cmd_get_args(self);
+	struct cmd_find_state	*source = cmdq_get_source(item);
+	struct cmd_find_state	 target;
+	const char		*tflag = args_get(args, 't');
+	struct session		*src = source->s;
+	struct session		*dst;
+	struct winlink		*wl = source->wl;
+	char			*cause;
+	int			 idx, kflag, dflag, sflag, before;
 
 	if (args_has(args, 'r')) {
-		s = cmd_find_session(cmdq, args_get(args, 't'), 0);
-		if (s == NULL)
+		if (cmd_find_target(&target, item, tflag, CMD_FIND_SESSION,
+		    CMD_FIND_QUIET) != 0)
 			return (CMD_RETURN_ERROR);
 
-		session_renumber_windows(s);
+		session_renumber_windows(target.s);
 		recalculate_sizes();
+		server_status_session(target.s);
 
 		return (CMD_RETURN_NORMAL);
 	}
-
-	if ((wl = cmd_find_window(cmdq, args_get(args, 's'), &src)) == NULL)
+	if (cmd_find_target(&target, item, tflag, CMD_FIND_WINDOW,
+	    CMD_FIND_WINDOW_INDEX) != 0)
 		return (CMD_RETURN_ERROR);
-	if ((idx = cmd_find_index(cmdq, args_get(args, 't'), &dst)) == -2)
-		return (CMD_RETURN_ERROR);
+	dst = target.s;
+	idx = target.idx;
 
-	kflag = args_has(self->args, 'k');
-	dflag = args_has(self->args, 'd');
-	sflag = args_has(self->args, 's');
+	kflag = args_has(args, 'k');
+	dflag = args_has(args, 'd');
+	sflag = args_has(args, 's');
 
-	if (args_has(self->args, 'a')) {
-		s = cmd_find_session(cmdq, args_get(args, 't'), 0);
-		if (s == NULL)
-			return (CMD_RETURN_ERROR);
-		if ((idx = winlink_shuffle_up(s, s->curw)) == -1)
+	before = args_has(args, 'b');
+	if (args_has(args, 'a') || before) {
+		if (target.wl != NULL)
+			idx = winlink_shuffle_up(dst, target.wl, before);
+		else
+			idx = winlink_shuffle_up(dst, dst->curw, before);
+		if (idx == -1)
 			return (CMD_RETURN_ERROR);
 	}
 
-	if (server_link_window(src, wl, dst, idx, kflag, !dflag,
-	    &cause) != 0) {
-		cmdq_error(cmdq, "can't link window: %s", cause);
+	if (server_link_window(src, wl, dst, idx, kflag, !dflag, &cause) != 0) {
+		cmdq_error(item, "%s", cause);
 		free(cause);
 		return (CMD_RETURN_ERROR);
 	}
-	if (self->entry == &cmd_move_window_entry)
+	if (cmd_get_entry(self) == &cmd_move_window_entry)
 		server_unlink_window(src, wl);
 
 	/*

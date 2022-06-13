@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2008 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
  * Copyright (c) 2011 Marcel P. Partap <mpartap@gmx.net>
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -20,7 +20,7 @@
 #include <sys/types.h>
 
 #include <stdlib.h>
-#include <unistd.h>
+#include <string.h>
 
 #include "tmux.h"
 
@@ -28,69 +28,71 @@
  * Respawn a pane (restart the command). Kill existing if -k given.
  */
 
-enum cmd_retval	 cmd_respawn_pane_exec(struct cmd *, struct cmd_q *);
+static enum cmd_retval	cmd_respawn_pane_exec(struct cmd *, struct cmdq_item *);
 
 const struct cmd_entry cmd_respawn_pane_entry = {
-	"respawn-pane", "respawnp",
-	"kt:", 0, -1,
-	"[-k] " CMD_TARGET_PANE_USAGE " [command]",
-	0,
-	cmd_respawn_pane_exec
+	.name = "respawn-pane",
+	.alias = "respawnp",
+
+	.args = { "c:e:kt:", 0, -1, NULL },
+	.usage = "[-k] [-c start-directory] [-e environment] "
+		 CMD_TARGET_PANE_USAGE " [shell-command]",
+
+	.target = { 't', CMD_FIND_PANE, 0 },
+
+	.flags = 0,
+	.exec = cmd_respawn_pane_exec
 };
 
-enum cmd_retval
-cmd_respawn_pane_exec(struct cmd *self, struct cmd_q *cmdq)
+static enum cmd_retval
+cmd_respawn_pane_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args		*args = self->args;
-	struct winlink		*wl;
-	struct window		*w;
-	struct window_pane	*wp;
-	struct session		*s;
-	struct environ		*env;
-	const char		*path;
-	char			*cause;
-	u_int			 idx;
-	struct environ_entry	*envent;
+	struct args		*args = cmd_get_args(self);
+	struct cmd_find_state	*target = cmdq_get_target(item);
+	struct spawn_context	 sc = { 0 };
+	struct session		*s = target->s;
+	struct winlink		*wl = target->wl;
+	struct window_pane	*wp = target->wp;
+	char			*cause = NULL;
+	struct args_value	*av;
 
-	if ((wl = cmd_find_pane(cmdq, args_get(args, 't'), &s, &wp)) == NULL)
-		return (CMD_RETURN_ERROR);
-	w = wl->window;
+	sc.item = item;
+	sc.s = s;
+	sc.wl = wl;
 
-	if (!args_has(self->args, 'k') && wp->fd != -1) {
-		if (window_pane_index(wp, &idx) != 0)
-			fatalx("index not found");
-		cmdq_error(cmdq, "pane still active: %s:%d.%u",
-		    s->name, wl->idx, idx);
-		return (CMD_RETURN_ERROR);
+	sc.wp0 = wp;
+
+	args_to_vector(args, &sc.argc, &sc.argv);
+	sc.environ = environ_create();
+
+	av = args_first_value(args, 'e');
+	while (av != NULL) {
+		environ_put(sc.environ, av->string, 0);
+		av = args_next_value(av);
 	}
 
-	env = environ_create();
-	environ_copy(global_environ, env);
-	environ_copy(s->environ, env);
-	server_fill_environ(s, env);
+	sc.idx = -1;
+	sc.cwd = args_get(args, 'c');
 
-	window_pane_reset_mode(wp);
-	screen_reinit(&wp->base);
-	input_init(wp);
+	sc.flags = SPAWN_RESPAWN;
+	if (args_has(args, 'k'))
+		sc.flags |= SPAWN_KILL;
 
-	path = NULL;
-	if (cmdq->client != NULL && cmdq->client->session == NULL)
-		envent = environ_find(cmdq->client->environ, "PATH");
-	else
-		envent = environ_find(s->environ, "PATH");
-	if (envent != NULL)
-		path = envent->value;
-
-	if (window_pane_spawn(wp, args->argc, args->argv, path, NULL, NULL, env,
-	    s->tio, &cause) != 0) {
-		cmdq_error(cmdq, "respawn pane failed: %s", cause);
+	if (spawn_pane(&sc, &cause) == NULL) {
+		cmdq_error(item, "respawn pane failed: %s", cause);
 		free(cause);
-		environ_free(env);
+		if (sc.argv != NULL)
+			cmd_free_argv(sc.argc, sc.argv);
+		environ_free(sc.environ);
 		return (CMD_RETURN_ERROR);
 	}
-	wp->flags |= PANE_REDRAW;
-	server_status_window(w);
 
-	environ_free(env);
+	wp->flags |= PANE_REDRAW;
+	server_redraw_window_borders(wp->window);
+	server_status_window(wp->window);
+
+	if (sc.argv != NULL)
+		cmd_free_argv(sc.argc, sc.argv);
+	environ_free(sc.environ);
 	return (CMD_RETURN_NORMAL);
 }

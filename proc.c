@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2015 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2015 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,14 +17,19 @@
  */
 
 #include <sys/types.h>
+#include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/utsname.h>
 
 #include <errno.h>
-#include <event.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#if defined(HAVE_NCURSES_H)
+#include <ncurses.h>
+#endif
 
 #include "tmux.h"
 
@@ -33,6 +38,17 @@ struct tmuxproc {
 	int		  exit;
 
 	void		(*signalcb)(int);
+
+	struct event	  ev_sigint;
+	struct event	  ev_sighup;
+	struct event	  ev_sigchld;
+	struct event	  ev_sigcont;
+	struct event	  ev_sigterm;
+	struct event	  ev_sigusr1;
+	struct event	  ev_sigusr2;
+	struct event	  ev_sigwinch;
+
+	TAILQ_HEAD(, tmuxpeer) peers;
 };
 
 struct tmuxpeer {
@@ -40,12 +56,15 @@ struct tmuxpeer {
 
 	struct imsgbuf	 ibuf;
 	struct event	 event;
+	uid_t		 uid;
 
 	int		 flags;
 #define PEER_BAD 0x1
 
 	void		(*dispatchcb)(struct imsg *, void *);
-	void		*arg;
+	void		 *arg;
+
+	TAILQ_ENTRY(tmuxpeer) entry;
 };
 
 static int	peer_check_version(struct tmuxpeer *, struct imsg *);
@@ -59,7 +78,8 @@ proc_event_cb(__unused int fd, short events, void *arg)
 	struct imsg	 imsg;
 
 	if (!(peer->flags & PEER_BAD) && (events & EV_READ)) {
-		if ((n = imsg_read(&peer->ibuf)) == -1 || n == 0) {
+		if (((n = imsg_read(&peer->ibuf)) == -1 && errno != EAGAIN) ||
+		    n == 0) {
 			peer->dispatchcb(NULL, peer->arg);
 			return;
 		}
@@ -158,55 +178,37 @@ proc_send(struct tmuxpeer *peer, enum msgtype type, int fd, const void *buf,
 	return (0);
 }
 
-int
-proc_send_s(struct tmuxpeer *peer, enum msgtype type, const char *s)
-{
-	return (proc_send(peer, type, -1, s, strlen(s) + 1));
-}
-
 struct tmuxproc *
-proc_start(const char *name, struct event_base *base, int forkflag,
-    void (*signalcb)(int))
+proc_start(const char *name)
 {
 	struct tmuxproc	*tp;
 	struct utsname	 u;
 
-	if (forkflag) {
-		switch (fork()) {
-		case -1:
-			fatal("fork failed");
-		case 0:
-			break;
-		default:
-			return (NULL);
-		}
-		if (daemon(1, 0) != 0)
-			fatal("daemon failed");
-
-		clear_signals(0);
-		if (event_reinit(base) != 0)
-			fatalx("event_reinit failed");
-	}
-
 	log_open(name);
-
-#ifdef HAVE_SETPROCTITLE
 	setproctitle("%s (%s)", name, socket_path);
-#endif
 
 	if (uname(&u) < 0)
 		memset(&u, 0, sizeof u);
 
-	log_debug("%s started (%ld): socket %s, protocol %d", name,
-	    (long)getpid(), socket_path, PROTOCOL_VERSION);
-	log_debug("on %s %s %s; libevent %s (%s)", u.sysname, u.release,
-	    u.version, event_get_version(), event_get_method());
+	log_debug("%s started (%ld): version %s, socket %s, protocol %d", name,
+	    (long)getpid(), getversion(), socket_path, PROTOCOL_VERSION);
+	log_debug("on %s %s %s", u.sysname, u.release, u.version);
+	log_debug("using libevent %s (%s)"
+#ifdef HAVE_UTF8PROC
+	    "; utf8proc %s"
+#endif
+#ifdef NCURSES_VERSION
+	    "; ncurses " NCURSES_VERSION
+#endif
+	    , event_get_version(), event_get_method()
+#ifdef HAVE_UTF8PROC
+	    , utf8proc_version()
+#endif
+	);
 
 	tp = xcalloc(1, sizeof *tp);
 	tp->name = xstrdup(name);
-
-	tp->signalcb = signalcb;
-	set_signals(proc_signal_cb, tp);
+	TAILQ_INIT(&tp->peers);
 
 	return (tp);
 }
@@ -224,7 +226,82 @@ proc_loop(struct tmuxproc *tp, int (*loopcb)(void))
 void
 proc_exit(struct tmuxproc *tp)
 {
+	struct tmuxpeer	*peer;
+
+	TAILQ_FOREACH(peer, &tp->peers, entry)
+	    imsg_flush(&peer->ibuf);
 	tp->exit = 1;
+}
+
+void
+proc_set_signals(struct tmuxproc *tp, void (*signalcb)(int))
+{
+	struct sigaction	sa;
+
+	tp->signalcb = signalcb;
+
+	memset(&sa, 0, sizeof sa);
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	sa.sa_handler = SIG_IGN;
+
+	sigaction(SIGPIPE, &sa, NULL);
+	sigaction(SIGTSTP, &sa, NULL);
+	sigaction(SIGTTIN, &sa, NULL);
+	sigaction(SIGTTOU, &sa, NULL);
+	sigaction(SIGQUIT, &sa, NULL);
+
+	signal_set(&tp->ev_sigint, SIGINT, proc_signal_cb, tp);
+	signal_add(&tp->ev_sigint, NULL);
+	signal_set(&tp->ev_sighup, SIGHUP, proc_signal_cb, tp);
+	signal_add(&tp->ev_sighup, NULL);
+	signal_set(&tp->ev_sigchld, SIGCHLD, proc_signal_cb, tp);
+	signal_add(&tp->ev_sigchld, NULL);
+	signal_set(&tp->ev_sigcont, SIGCONT, proc_signal_cb, tp);
+	signal_add(&tp->ev_sigcont, NULL);
+	signal_set(&tp->ev_sigterm, SIGTERM, proc_signal_cb, tp);
+	signal_add(&tp->ev_sigterm, NULL);
+	signal_set(&tp->ev_sigusr1, SIGUSR1, proc_signal_cb, tp);
+	signal_add(&tp->ev_sigusr1, NULL);
+	signal_set(&tp->ev_sigusr2, SIGUSR2, proc_signal_cb, tp);
+	signal_add(&tp->ev_sigusr2, NULL);
+	signal_set(&tp->ev_sigwinch, SIGWINCH, proc_signal_cb, tp);
+	signal_add(&tp->ev_sigwinch, NULL);
+}
+
+void
+proc_clear_signals(struct tmuxproc *tp, int defaults)
+{
+	struct sigaction	sa;
+
+	memset(&sa, 0, sizeof sa);
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART;
+	sa.sa_handler = SIG_DFL;
+
+	sigaction(SIGPIPE, &sa, NULL);
+	sigaction(SIGTSTP, &sa, NULL);
+
+	signal_del(&tp->ev_sigint);
+	signal_del(&tp->ev_sighup);
+	signal_del(&tp->ev_sigchld);
+	signal_del(&tp->ev_sigcont);
+	signal_del(&tp->ev_sigterm);
+	signal_del(&tp->ev_sigusr1);
+	signal_del(&tp->ev_sigusr2);
+	signal_del(&tp->ev_sigwinch);
+
+	if (defaults) {
+		sigaction(SIGINT, &sa, NULL);
+		sigaction(SIGQUIT, &sa, NULL);
+		sigaction(SIGHUP, &sa, NULL);
+		sigaction(SIGCHLD, &sa, NULL);
+		sigaction(SIGCONT, &sa, NULL);
+		sigaction(SIGTERM, &sa, NULL);
+		sigaction(SIGUSR1, &sa, NULL);
+		sigaction(SIGUSR2, &sa, NULL);
+		sigaction(SIGWINCH, &sa, NULL);
+	}
 }
 
 struct tmuxpeer *
@@ -232,6 +309,7 @@ proc_add_peer(struct tmuxproc *tp, int fd,
     void (*dispatchcb)(struct imsg *, void *), void *arg)
 {
 	struct tmuxpeer	*peer;
+	gid_t		 gid;
 
 	peer = xcalloc(1, sizeof *peer);
 	peer->parent = tp;
@@ -242,7 +320,11 @@ proc_add_peer(struct tmuxproc *tp, int fd,
 	imsg_init(&peer->ibuf, fd);
 	event_set(&peer->event, fd, EV_READ, proc_event_cb, peer);
 
+	if (getpeereid(fd, &peer->uid, &gid) != 0)
+		peer->uid = (uid_t)-1;
+
 	log_debug("add peer %p: %d (%p)", peer, fd, arg);
+	TAILQ_INSERT_TAIL(&tp->peers, peer, entry);
 
 	proc_update_event(peer);
 	return (peer);
@@ -251,6 +333,7 @@ proc_add_peer(struct tmuxproc *tp, int fd,
 void
 proc_remove_peer(struct tmuxpeer *peer)
 {
+	TAILQ_REMOVE(&peer->parent->peers, peer, entry);
 	log_debug("remove peer %p", peer);
 
 	event_del(&peer->event);
@@ -264,4 +347,46 @@ void
 proc_kill_peer(struct tmuxpeer *peer)
 {
 	peer->flags |= PEER_BAD;
+}
+
+void
+proc_flush_peer(struct tmuxpeer *peer)
+{
+	imsg_flush(&peer->ibuf);
+}
+
+void
+proc_toggle_log(struct tmuxproc *tp)
+{
+	log_toggle(tp->name);
+}
+
+pid_t
+proc_fork_and_daemon(int *fd)
+{
+	pid_t	pid;
+	int	pair[2];
+
+	if (socketpair(AF_UNIX, SOCK_STREAM, PF_UNSPEC, pair) != 0)
+		fatal("socketpair failed");
+	switch (pid = fork()) {
+	case -1:
+		fatal("fork failed");
+	case 0:
+		close(pair[0]);
+		*fd = pair[1];
+		if (daemon(1, 0) != 0)
+			fatal("daemon failed");
+		return (0);
+	default:
+		close(pair[1]);
+		*fd = pair[0];
+		return (pid);
+	}
+}
+
+uid_t
+proc_get_peer_uid(struct tmuxpeer *peer)
+{
+	return (peer->uid);
 }

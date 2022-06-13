@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2007 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -24,57 +24,73 @@
  * Enter copy or clock mode.
  */
 
-enum cmd_retval	 cmd_copy_mode_exec(struct cmd *, struct cmd_q *);
+static enum cmd_retval	cmd_copy_mode_exec(struct cmd *, struct cmdq_item *);
 
 const struct cmd_entry cmd_copy_mode_entry = {
-	"copy-mode", NULL,
-	"Met:u", 0, 0,
-	"[-Meu] " CMD_TARGET_PANE_USAGE,
-	0,
-	cmd_copy_mode_exec
+	.name = "copy-mode",
+	.alias = NULL,
+
+	.args = { "eHMs:t:uq", 0, 0, NULL },
+	.usage = "[-eHMuq] [-s src-pane] " CMD_TARGET_PANE_USAGE,
+
+	.source =  { 's', CMD_FIND_PANE, 0 },
+	.target = { 't', CMD_FIND_PANE, 0 },
+
+	.flags = CMD_AFTERHOOK,
+	.exec = cmd_copy_mode_exec
 };
 
 const struct cmd_entry cmd_clock_mode_entry = {
-	"clock-mode", NULL,
-	"t:", 0, 0,
-	CMD_TARGET_PANE_USAGE,
-	0,
-	cmd_copy_mode_exec
+	.name = "clock-mode",
+	.alias = NULL,
+
+	.args = { "t:", 0, 0, NULL },
+	.usage = CMD_TARGET_PANE_USAGE,
+
+	.target = { 't', CMD_FIND_PANE, 0 },
+
+	.flags = CMD_AFTERHOOK,
+	.exec = cmd_copy_mode_exec
 };
 
-enum cmd_retval
-cmd_copy_mode_exec(struct cmd *self, struct cmd_q *cmdq)
+static enum cmd_retval
+cmd_copy_mode_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct args		*args = self->args;
-	struct client		*c = cmdq->client;
+	struct args		*args = cmd_get_args(self);
+	struct key_event	*event = cmdq_get_event(item);
+	struct cmd_find_state	*source = cmdq_get_source(item);
+	struct cmd_find_state	*target = cmdq_get_target(item);
+	struct client		*c = cmdq_get_client(item);
 	struct session		*s;
-	struct window_pane	*wp;
+	struct window_pane	*wp = target->wp, *swp;
 
-	if (args_has(args, 'M')) {
-		if ((wp = cmd_mouse_pane(&cmdq->item->mouse, &s, NULL)) == NULL)
-			return (CMD_RETURN_NORMAL);
-		if (c == NULL || c->session != s)
-			return (CMD_RETURN_NORMAL);
-	} else if (cmd_find_pane(cmdq, args_get(args, 't'), NULL, &wp) == NULL)
-		return (CMD_RETURN_ERROR);
-
-	if (self->entry == &cmd_clock_mode_entry) {
-		window_pane_set_mode(wp, &window_clock_mode);
+	if (args_has(args, 'q')) {
+		window_pane_reset_mode_all(wp);
 		return (CMD_RETURN_NORMAL);
 	}
 
-	if (wp->mode != &window_copy_mode) {
-		if (window_pane_set_mode(wp, &window_copy_mode) != 0)
-			return (CMD_RETURN_NORMAL);
-		window_copy_init_from_pane(wp, args_has(self->args, 'e'));
-	}
 	if (args_has(args, 'M')) {
-		if (wp->mode != NULL && wp->mode != &window_copy_mode)
+		if ((wp = cmd_mouse_pane(&event->m, &s, NULL)) == NULL)
 			return (CMD_RETURN_NORMAL);
-		window_copy_start_drag(c, &cmdq->item->mouse);
+		if (c == NULL || c->session != s)
+			return (CMD_RETURN_NORMAL);
 	}
-	if (wp->mode == &window_copy_mode && args_has(self->args, 'u'))
-		window_copy_pageup(wp);
+
+	if (cmd_get_entry(self) == &cmd_clock_mode_entry) {
+		window_pane_set_mode(wp, NULL, &window_clock_mode, NULL, NULL);
+		return (CMD_RETURN_NORMAL);
+	}
+
+	if (args_has(args, 's'))
+		swp = source->wp;
+	else
+		swp = wp;
+	if (!window_pane_set_mode(wp, swp, &window_copy_mode, NULL, args)) {
+		if (args_has(args, 'M'))
+			window_copy_start_drag(c, &event->m);
+	}
+	if (args_has(args, 'u'))
+		window_copy_pageup(wp, 0);
 
 	return (CMD_RETURN_NORMAL);
 }

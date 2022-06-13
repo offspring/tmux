@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2009 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -25,10 +25,12 @@
 
 #include "tmux.h"
 
-void	name_time_callback(int, short, void *);
-int	name_time_expired(struct window *, struct timeval *);
+static void	 name_time_callback(int, short, void *);
+static int	 name_time_expired(struct window *, struct timeval *);
 
-void
+static char	*format_window_name(struct window *);
+
+static void
 name_time_callback(__unused int fd, __unused short events, void *arg)
 {
 	struct window	*w = arg;
@@ -37,7 +39,7 @@ name_time_callback(__unused int fd, __unused short events, void *arg)
 	log_debug("@%u name timer expired", w->id);
 }
 
-int
+static int
 name_time_expired(struct window *w, struct timeval *tv)
 {
 	struct timeval	offset;
@@ -73,12 +75,15 @@ check_window_name(struct window *w)
 		if (!event_initialized(&w->name_event))
 			evtimer_set(&w->name_event, name_time_callback, w);
 		if (!evtimer_pending(&w->name_event, NULL)) {
-			log_debug("@%u name timer queued (%d left)", w->id, left);
+			log_debug("@%u name timer queued (%d left)", w->id,
+			    left);
 			timerclear(&next);
 			next.tv_usec = left;
 			event_add(&w->name_event, &next);
-		} else
-			log_debug("@%u name timer already queued (%d left)", w->id, left);
+		} else {
+			log_debug("@%u name timer already queued (%d left)",
+			    w->id, left);
+		}
 		return;
 	}
 	memcpy(&w->name_time, &tv, sizeof w->name_time);
@@ -91,6 +96,7 @@ check_window_name(struct window *w)
 	if (strcmp(name, w->name) != 0) {
 		log_debug("@%u new name %s (was %s)", w->id, name, w->name);
 		window_set_name(w, name);
+		server_redraw_window_borders(w);
 		server_status_window(w);
 	} else
 		log_debug("@%u name not changed (still %s)", w->id, w->name);
@@ -101,8 +107,10 @@ check_window_name(struct window *w)
 char *
 default_window_name(struct window *w)
 {
-	char    *cmd, *s;
+	char	*cmd, *s;
 
+	if (w->active == NULL)
+		return (xstrdup(""));
 	cmd = cmd_stringify_argv(w->active->argc, w->active->argv);
 	if (cmd != NULL && *cmd != '\0')
 		s = parse_window_name(cmd);
@@ -112,13 +120,14 @@ default_window_name(struct window *w)
 	return (s);
 }
 
-char *
+static char *
 format_window_name(struct window *w)
 {
 	struct format_tree	*ft;
-	char			*fmt, *name;
+	const char		*fmt;
+	char			*name;
 
-	ft = format_create();
+	ft = format_create(NULL, NULL, FORMAT_WINDOW|w->id, 0);
 	format_defaults_window(ft, w);
 	format_defaults_pane(ft, w->active);
 
@@ -135,6 +144,10 @@ parse_window_name(const char *in)
 	char	*copy, *name, *ptr;
 
 	name = copy = xstrdup(in);
+	if (*name == '"')
+		name++;
+	name[strcspn(name, "\"")] = '\0';
+
 	if (strncmp(name, "exec ", (sizeof "exec ") - 1) == 0)
 		name = name + (sizeof "exec ") - 1;
 
@@ -145,7 +158,9 @@ parse_window_name(const char *in)
 
 	if (*name != '\0') {
 		ptr = name + strlen(name) - 1;
-		while (ptr > name && !isalnum((u_char)*ptr))
+		while (ptr > name &&
+		    !isalnum((u_char)*ptr) &&
+		    !ispunct((u_char)*ptr))
 			*ptr-- = '\0';
 	}
 

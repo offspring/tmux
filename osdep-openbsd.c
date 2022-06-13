@@ -1,7 +1,7 @@
 /* $OpenBSD$ */
 
 /*
- * Copyright (c) 2009 Nicholas Marriott <nicm@users.sourceforge.net>
+ * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -16,17 +16,18 @@
  * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <sys/param.h>	/* MAXCOMLEN */
 #include <sys/types.h>
+#include <sys/signal.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
 #include <sys/stat.h>
 
 #include <errno.h>
-#include <event.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#include "compat.h"
 
 #ifndef nitems
 #define nitems(_a) (sizeof((_a)) / sizeof((_a)[0]))
@@ -37,12 +38,12 @@
 #define is_stopped(p) \
 	((p)->p_stat == SSTOP || (p)->p_stat == SDEAD)
 
-struct kinfo_proc	*cmp_procs(struct kinfo_proc *, struct kinfo_proc *);
-char			*osdep_get_name(int, char *);
-char			*osdep_get_cwd(int);
-struct event_base	*osdep_event_init(void);
+static struct kinfo_proc *cmp_procs(struct kinfo_proc *, struct kinfo_proc *);
+char			 *osdep_get_name(int, char *);
+char			 *osdep_get_cwd(int);
+struct event_base	 *osdep_event_init(void);
 
-struct kinfo_proc *
+static struct kinfo_proc *
 cmp_procs(struct kinfo_proc *p1, struct kinfo_proc *p2)
 {
 	if (is_runnable(p1) && !is_runnable(p2))
@@ -140,7 +141,7 @@ char *
 osdep_get_cwd(int fd)
 {
 	int		name[] = { CTL_KERN, KERN_PROC_CWD, 0 };
-	static char	path[MAXPATHLEN];
+	static char	path[PATH_MAX];
 	size_t		pathlen = sizeof path;
 
 	if ((name[2] = tcgetpgrp(fd)) == -1)

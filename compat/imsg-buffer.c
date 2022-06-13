@@ -1,4 +1,4 @@
-/*	$OpenBSD: imsg-buffer.c,v 1.7 2015/07/12 18:40:49 nicm Exp $	*/
+/*	$OpenBSD: imsg-buffer.c,v 1.12 2019/01/20 02:50:03 bcook Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -26,12 +26,12 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "tmux.h"
+#include "compat.h"
 #include "imsg.h"
 
-int	ibuf_realloc(struct ibuf *, size_t);
-void	ibuf_enqueue(struct msgbuf *, struct ibuf *);
-void	ibuf_dequeue(struct msgbuf *, struct ibuf *);
+static int	ibuf_realloc(struct ibuf *, size_t);
+static void	ibuf_enqueue(struct msgbuf *, struct ibuf *);
+static void	ibuf_dequeue(struct msgbuf *, struct ibuf *);
 
 struct ibuf *
 ibuf_open(size_t len)
@@ -67,10 +67,10 @@ ibuf_dynamic(size_t len, size_t max)
 	return (buf);
 }
 
-int
+static int
 ibuf_realloc(struct ibuf *buf, size_t len)
 {
-	u_char	*b;
+	unsigned char	*b;
 
 	/* on static buffers max is eq size and so the following fails */
 	if (buf->wpos + len > buf->max) {
@@ -78,7 +78,7 @@ ibuf_realloc(struct ibuf *buf, size_t len)
 		return (-1);
 	}
 
-	b = realloc(buf->buf, buf->wpos + len);
+	b = recallocarray(buf->buf, buf->size, buf->wpos + len, 1);
 	if (b == NULL)
 		return (-1);
 	buf->buf = b;
@@ -180,7 +180,9 @@ again:
 void
 ibuf_free(struct ibuf *buf)
 {
-	free(buf->buf);
+	if (buf == NULL)
+		return;
+	freezero(buf->buf, buf->size);
 	free(buf);
 }
 
@@ -287,14 +289,14 @@ again:
 	return (1);
 }
 
-void
+static void
 ibuf_enqueue(struct msgbuf *msgbuf, struct ibuf *buf)
 {
 	TAILQ_INSERT_TAIL(&msgbuf->bufs, buf, entry);
 	msgbuf->queued++;
 }
 
-void
+static void
 ibuf_dequeue(struct msgbuf *msgbuf, struct ibuf *buf)
 {
 	TAILQ_REMOVE(&msgbuf->bufs, buf, entry);
